@@ -49,6 +49,7 @@ extern "C"
 #define TEST_BUFFER_NUM  3
 #define MAX_PLANE_COUNT  3
 #define MAX_BUFFER_COUNT 4      
+#define FMT_NUM_PLANES   3
 
         struct testbuffer
         {
@@ -131,7 +132,13 @@ extern "C"
                         buf.memory = V4L2_MEMORY_MMAP;
                         buf.index = g_buffers;
                         buf.length = MAX_PLANE_COUNT;
-                        buf.m.planes = planes;
+                        buf.m.planes = &planes[0];
+                        printf("[%s:%d] buf.type=%d\n", __func__, __LINE__, buf.type);
+                        printf("[%s:%d] buf.memory=%d\n", __func__, __LINE__, buf.memory);
+                        printf("[%s:%d] buf.index=%d\n", __func__, __LINE__, buf.index);
+                        printf("[%s:%d] buf.length=%d\n", __func__, __LINE__, buf.length);
+                        printf("[%s:%d] buf.m.planes=%p\n", __func__, __LINE__, buf.m.planes);
+
                         if (ioctl(fd_v4l, VIDIOC_QUERYBUF, &buf) < 0)
                         {
                                 printf("VIDIOC_QUERYBUF error\n");
@@ -391,23 +398,20 @@ extern "C"
 
         int v4l_capture_test(int fd_v4l, const char *file)
         {
+
                 struct v4l2_buffer buf;
                 struct v4l2_plane planes[MAX_PLANE_COUNT];
 #if TEST_OUTSYNC_ENQUE
                 struct v4l2_buffer temp_buf;
 #endif
                 struct v4l2_format fmt;
-                FILE *fd_y_file = 0;
+                FILE *fp = 0;
                 size_t wsize;
+                char file_name[128];
                 int count = g_capture_count;
                 printf("[%s:%d] write to %s\n", __func__, __LINE__, file);
 
-                if ((fd_y_file = fopen(file, "wb")) == NULL)
-                {
-                        printf("Unable to create y frame recording file\n");
-                        return -1;
-                }
-                printf("[%s:%d] File %s open succeed \n", __func__, __LINE__, file);
+
 
               
                 memset(&fmt, 0, sizeof(fmt));
@@ -434,50 +438,151 @@ extern "C"
 
                 while (count-- > 0)
                 {
-                        memset(&buf, 0, sizeof(buf));
-                        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-                        buf.memory = V4L2_MEMORY_MMAP;
-                        if (ioctl(fd_v4l, VIDIOC_DQBUF, &buf) < 0)
+                        if( g_buffers > 0 )
                         {
-                                printf("VIDIOC_DQBUF failed.\n");
-                        }
-
-                        // wsize = fwrite(buffers[buf.index].start, fmt.fmt.pix.sizeimage, 1, fd_y_file);
-                        if (wsize < 1)
-                        {
-                                printf("No space left on device. Stopping after %d frames.\n",
-                                       g_capture_count - (count + 1));
-                                break;
-                        }
-
-#if TEST_OUTSYNC_ENQUE
-                        /* Testing out of order enque */
-                        if (count == 25)
-                        {
-                                temp_buf = buf;
-                                printf("buf.index %d\n", buf.index);
-                                continue;
-                        }
-
-                        if (count == 15)
-                        {
-                                if (ioctl(fd_v4l, VIDIOC_QBUF, &temp_buf) < 0)
+                                struct v4l2_buffer buf;
+                                struct plane_buffer *buffer;
+                                struct v4l2_plane planes[MAX_PLANE_COUNT]; 
+                                memset(&buf, 0, sizeof(buf));
+                                memset(&planes[0],0,(sizeof(struct v4l2_plane) * MAX_PLANE_COUNT));
+                                buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+                                buf.length = FMT_NUM_PLANES;
+                                buf.m.planes = &planes[0];
+                                buf.memory = V4L2_MEMORY_MMAP;
+                                if (ioctl(fd_v4l, VIDIOC_DQBUF, &buf) < 0)
                                 {
-                                        printf("VIDIOC_QBUF failed\n");
-                                        break;
+                                        printf("VIDIOC_DQBUF failed.\n");
+                                        return -1;
+                                }
+
+                                if( buf.index < g_buffers)
+                                {
+                                        buffer = &g_plane_buffer[buf.index];
+                                        const void *p1 = buffer->virt[0]; // y
+                                        const void *p2 = buffer->virt[1]; // cr
+                                        const void *p3 = buffer->virt[2]; // cb
+
+                                        int size1 = buffer->sizes[0]; // size of y
+                                        int size2 = buffer->sizes[2]; // size of u(cr)
+                                        int size3 = buffer->sizes[1]; // size of v(cb)
+
+                                        const unsigned char *py = (const unsigned char *)p1;
+                                        const unsigned char *pcr = (const unsigned char *)p3;
+                                        const unsigned char *pcb = (const unsigned char *)p2;
+                                        const unsigned char *pobp = (const unsigned char *)p1;
+
+                                        int size_y = size1;
+                                        int size_cr = size2;
+                                        int size_cb = size3;
+                                        int size_obp = 0;
+
+                                        int image_size_y = g_out_width * g_out_height;
+                                        int image_size_c = image_size_y;
+
+                                        int heigh = g_out_height;
+                                        int width = g_out_width;
+                                        int cbcr_width = width/2;
+
+                                        if( g_cap_fmt == V4L2_PIX_FMT_YUV422P)
+                                        {
+                                                image_size_c = image_size_y/2;
+                                        }
+                                        else{
+                                                if(( g_cap_fmt == V4L2_PIX_FMT_YUV420) || (g_cap_fmt == V4L2_PIX_FMT_YUV420M))
+                                                {
+                                                        image_size_c = image_size_y/4;
+                                                }
+                                        }
+                                        if( image_size_y > size_y)
+                                        {
+                                               printf("[%s] Error: pixel %d is lager than buffer size %d",__func__,image_size_y,size1);
+                                               return -1; 
+                                        }
+                                        else
+                                        {
+                                                size_y = image_size_y;
+                                                size_cr = size_cb = image_size_c;
+                                        }
+                                        memset( file_name,0,sizeof(file_name));
+
+                                        int planes_=0;
+
+                                        switch (g_cap_fmt)
+                                        {
+                                        case V4L2_PIX_FMT_YUV422P:
+                                        {
+                                                sprintf(file_name,"%s%03d.%s",file,count,"yuv");
+                                                planes_=3;
+                                        }
+                                                break;
+                                        case V4L2_PIX_FMT_YUV420:
+                                        case V4L2_PIX_FMT_YUV420M:
+                                        {
+                                                sprintf(file_name,"%s%03d.%s",file,count,"420");
+                                                planes_=3;
+                                                break;
+                                        }
+
+                                        case V4L2_PIX_FMT_SRGGB8:
+                                        {
+                                                sprintf(file_name,"%s%03d.%s",file,count,"420");
+                                                planes_=1;
+                                                break;
+                                                
+                                        }
+                                        
+                                        default:
+                                                break;
+                                        }
+
+
+                                        fp=fopen(file_name,"w");
+                                        if( fp )
+                                        {
+                                                printf("frame %d : p=%p size1=%d, size2=%d, size3=%d\n",count, p1, size1, size2, size3);
+                                                if( planes_ > 0 )
+                                                {
+                                                        fwrite(p1,size1,1,fp);
+                                                        if( planes_ > 1 )
+                                                        {
+                                                                fwrite(p2,size2,1,fp);
+                                                                fwrite(p3,size3,1,fp);
+                                                        }
+                                                }
+                                                fclose(fp);
+                                        }
+
                                 }
                         }
-#endif
-                        if (count >= TEST_BUFFER_NUM)
-                        {
-                                if (ioctl(fd_v4l, VIDIOC_QBUF, &buf) < 0)
-                                {
-                                        printf("VIDIOC_QBUF failed\n");
-                                        break;
-                                }
-                        }
-                        else
-                                printf("buf.index %d\n", buf.index);
+
+// #if TEST_OUTSYNC_ENQUE
+//                         /* Testing out of order enque */
+//                         if (count == 25)
+//                         {
+//                                 temp_buf = buf;
+//                                 printf("buf.index %d\n", buf.index);
+//                                 continue;
+//                         }
+
+//                         if (count == 15)
+//                         {
+//                                 if (ioctl(fd_v4l, VIDIOC_QBUF, &temp_buf) < 0)
+//                                 {
+//                                         printf("VIDIOC_QBUF failed\n");
+//                                         break;
+//                                 }
+//                         }
+// #endif
+//                         if (count >= TEST_BUFFER_NUM)
+//                         {
+//                                 if (ioctl(fd_v4l, VIDIOC_QBUF, &buf) < 0)
+//                                 {
+//                                         printf("VIDIOC_QBUF failed\n");
+//                                         break;
+//                                 }
+//                         }
+//                         else
+//                                 printf("buf.index %d\n", buf.index);
                 }
 
                 if (stop_capturing(fd_v4l) < 0)
@@ -485,9 +590,6 @@ extern "C"
                         printf("stop_capturing failed\n");
                         return -1;
                 }
-
-                fclose(fd_y_file);
-
                 close(fd_v4l);
                 return 0;
         }
@@ -609,6 +711,9 @@ extern "C"
         int main(int argc, char **argv)
         {
                 int fd_v4l;
+                printf("Program Start\n");
+                printf("Programed by mirika(david.kang@sdt.inc)\n");
+                printf("Build Dta %s %s\n",__DATE__,__TIME__);
 
                 // print_name(argv);
 
